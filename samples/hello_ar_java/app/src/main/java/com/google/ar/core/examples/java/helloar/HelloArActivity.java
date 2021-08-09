@@ -16,6 +16,7 @@
 
 package com.google.ar.core.examples.java.helloar;
 
+import android.annotation.SuppressLint;
 import android.content.DialogInterface;
 import android.content.res.Resources;
 import android.media.Image;
@@ -29,6 +30,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.widget.ImageButton;
 import android.widget.PopupMenu;
+import android.widget.TextView;
 import android.widget.Toast;
 import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
@@ -46,6 +48,7 @@ import com.google.ar.core.Plane;
 import com.google.ar.core.Point;
 import com.google.ar.core.Point.OrientationMode;
 import com.google.ar.core.PointCloud;
+import com.google.ar.core.Pose;
 import com.google.ar.core.Session;
 import com.google.ar.core.Trackable;
 import com.google.ar.core.TrackingFailureReason;
@@ -81,6 +84,7 @@ import java.nio.ByteBuffer;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
+import java.util.Vector;
 
 /**
  * This is a simple example that shows how to create an augmented reality (AR) application using the
@@ -156,7 +160,9 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
   // Virtual object (ARCore pawn)
   private Mesh virtualObjectMesh;
   private Shader virtualObjectShader;
+  private Shader virtualObjectShaderForPath;
   private final ArrayList<Anchor> anchors = new ArrayList<>();
+  private final ArrayList<Pose> cameraPoses = new ArrayList<>();
 
   // Environmental HDR
   private Texture dfgTexture;
@@ -172,6 +178,8 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
   private final float[] viewInverseMatrix = new float[16];
   private final float[] worldLightDirection = {0.0f, 0.0f, 0.0f, 0.0f};
   private final float[] viewLightDirection = new float[4]; // view x world light direction
+
+  private TextView textView;
 
   @Override
   protected void onCreate(Bundle savedInstanceState) {
@@ -191,6 +199,7 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
 
     depthSettings.onCreate(this);
     instantPlacementSettings.onCreate(this);
+    textView = findViewById(R.id.log);
     ImageButton settingsButton = findViewById(R.id.settings_button);
     settingsButton.setOnClickListener(
         new View.OnClickListener() {
@@ -423,6 +432,20 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
               .setTexture("u_RoughnessMetallicAmbientOcclusionTexture", virtualObjectPbrTexture)
               .setTexture("u_Cubemap", cubemapFilter.getFilteredCubemapTexture())
               .setTexture("u_DfgTexture", dfgTexture);
+      virtualObjectShaderForPath =
+              Shader.createFromAssets(
+                      render,
+                      "shaders/environmental_hdr.vert",
+                      "shaders/environmental_hdr.frag",
+                      /*defines=*/ new HashMap<String, String>() {
+                        {
+                          put(
+                                  "NUMBER_OF_MIPMAP_LEVELS",
+                                  Integer.toString(cubemapFilter.getNumberOfMipmapLevels()));
+                        }
+                      })
+                      .setTexture("u_Cubemap", cubemapFilter.getFilteredCubemapTexture())
+                      .setTexture("u_DfgTexture", dfgTexture);
     } catch (IOException e) {
       Log.e(TAG, "Failed to read a required asset file", e);
       messageSnackbarHelper.showError(this, "Failed to read a required asset file: " + e);
@@ -434,6 +457,20 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
     displayRotationHelper.onSurfaceChanged(width, height);
     virtualSceneFramebuffer.resize(width, height);
   }
+
+  // Distance on floor
+  private double getDistance(Pose a, Pose b) {
+    return Math.sqrt(
+            Math.pow(a.tx() - b.tx(), 2) +
+                    Math.pow(a.tz() - b.tz(), 2)
+    );
+  }
+
+  private float startX = 0.0f;
+  private float startY = 0.0f;
+  private float startZ = 0.0f;
+  Pose prevCameraPose;
+  int camearPoseCnt = 0;
 
   @Override
   public void onDrawFrame(SampleRender render) {
@@ -496,6 +533,43 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
 
     // Handle one tap per frame.
     handleTap(frame, camera);
+
+    camearPoseCnt++;
+
+    if (anchors.size() == 1) {
+      Pose anchorPose = anchors.get(0).getPose();
+      Pose cameraPose = camera.getPose();
+
+      float relativeX = cameraPose.tx() - startX;
+      float relativeY = cameraPose.ty() - startY;
+      float relativeZ = cameraPose.tz() - startZ;
+      /*
+      Log.w(TAG + "_WLAB", "(" +
+              (relativeX) + ", " +
+              (relativeY) + ", " +
+              (relativeZ) + ")");
+      */
+      cameraPoses.add(Pose.makeTranslation(cameraPose.tx(), startY, cameraPose.tz()));
+
+      double distanceAgainstAnchor = getDistance(anchorPose, cameraPose);
+      if (prevCameraPose != null) {
+        double distanceAgainstPrev = getDistance(prevCameraPose, camera.getPose());
+        @SuppressLint("DefaultLocale") String msg2 = String.format("START~ %.2f(cm) | PREV~ %.2f(cm)\n(x:%f, y:%f, z:%f)", distanceAgainstAnchor, distanceAgainstPrev, relativeX, relativeY, relativeZ);
+        @SuppressLint("DefaultLocale") String msg1 = String.format("START~ %.2f(cm) | PREV~ %.2f(cm) | (x:%f, y:%f, z:%f)", distanceAgainstAnchor, distanceAgainstPrev, relativeX, relativeY, relativeZ);
+        Log.d(TAG + "_WLAB", msg1);
+
+        runOnUiThread(new Runnable() {
+          @Override
+          public void run() {
+            if (camearPoseCnt % 10 == 0) {
+              textView.setText(msg2);
+              // Toast.makeText(HelloArActivity.this, msg, Toast.LENGTH_SHORT).show();
+            }
+          }
+        });
+      }
+      prevCameraPose = camera.getPose();
+    }
 
     // Keep the screen unlocked while tracking, but allow it to lock when tracking stops.
     trackingStateHelper.updateKeepScreenOnFlag(camera.getTrackingState());
@@ -588,6 +662,21 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
       render.draw(virtualObjectMesh, virtualObjectShader, virtualSceneFramebuffer);
     }
 
+    for (Pose pose : cameraPoses) {
+      // Get the current pose of an Anchor in world space. The Anchor pose is updated
+      // during calls to session.update() as ARCore refines its estimate of the world.
+      pose.toMatrix(modelMatrix, 0);
+
+      // Calculate model/view/projection matrices
+      Matrix.multiplyMM(modelViewMatrix, 0, viewMatrix, 0, modelMatrix, 0);
+      Matrix.multiplyMM(modelViewProjectionMatrix, 0, projectionMatrix, 0, modelViewMatrix, 0);
+
+      // Update shader properties and draw
+      virtualObjectShaderForPath.setMat4("u_ModelView", modelViewMatrix);
+      virtualObjectShaderForPath.setMat4("u_ModelViewProjection", modelViewProjectionMatrix);
+      render.draw(virtualObjectMesh, virtualObjectShaderForPath, virtualSceneFramebuffer);
+    }
+
     // Compose the virtual scene with the background.
     backgroundRenderer.drawVirtualScene(render, virtualSceneFramebuffer, Z_NEAR, Z_FAR);
   }
@@ -618,18 +707,23 @@ public class HelloArActivity extends AppCompatActivity implements SampleRender.R
             || (trackable instanceof DepthPoint)) {
           // Cap the number of objects created. This avoids overloading both the
           // rendering system and ARCore.
-          if (anchors.size() >= 20) {
-            anchors.get(0).detach();
-            anchors.remove(0);
-          }
 
-          // Adding an Anchor tells ARCore that it should track this position in
-          // space. This anchor is created on the Plane to place the 3D model
-          // in the correct position relative both to the world and to the plane.
-          anchors.add(hit.createAnchor());
-          // For devices that support the Depth API, shows a dialog to suggest enabling
-          // depth-based occlusion. This dialog needs to be spawned on the UI thread.
-          this.runOnUiThread(this::showOcclusionDialogIfNeeded);
+          if (anchors.size() == 1) {
+
+          } else {
+            anchors.add(hit.createAnchor());
+            Pose anchorPose = anchors.get(0).getPose();
+            startX = anchorPose.tx();
+            startY = anchorPose.ty();
+            startZ = anchorPose.tz();
+            Log.w(TAG + "_WLAB", "(" +
+                            (startX - startX) + ", " +
+                            (startY - startY) + ", " +
+                            (startZ - startZ) + ")");
+            // For devices that support the Depth API, shows a dialog to suggest enabling
+            // depth-based occlusion. This dialog needs to be spawned on the UI thread.
+            this.runOnUiThread(this::showOcclusionDialogIfNeeded);
+          }
 
           // Hits are sorted by depth. Consider only closest hit on a plane, Oriented Point, or
           // Instant Placement Point.
